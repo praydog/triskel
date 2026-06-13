@@ -50,16 +50,20 @@ struct SpanningTree {
                     continue;
                 }
 
+                bool has_higher_rank_parent = false;
                 for (const auto& parent : node.parent_nodes()) {
                     if (ranks.get(parent) >= rank) {
-                        goto continue_loop;
+                        has_higher_rank_parent = true;
+                        break;
                     }
+                }
+
+                if (has_higher_rank_parent) {
+                    continue;
                 }
 
                 ranks.set(node, rank);
                 found_nodes += 1;
-
-            continue_loop:
             }
 
             rank += 1;
