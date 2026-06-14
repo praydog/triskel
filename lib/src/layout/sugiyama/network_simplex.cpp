@@ -45,6 +45,8 @@ struct SpanningTree {
         size_t rank        = 1;
 
         while (found_nodes < nodes.size()) {
+            const size_t before = found_nodes;
+
             for (const auto& node : nodes) {
                 if (ranks.get(node) < rank) {
                     continue;
@@ -67,6 +69,22 @@ struct SpanningTree {
             }
 
             rank += 1;
+
+            // Defensive termination: if a full pass ranked no node, the remaining
+            // nodes form a cycle that cycle removal could not break -- it only
+            // reverses edges reachable from the (region) root, so a component of a
+            // SESE region subgraph that is unreachable from the region root keeps a
+            // cycle and no node in it can ever be ranked below all its parents.
+            // Without this guard the loop spins forever. Place the rest at the
+            // current rank so layout terminates instead of hanging.
+            if (found_nodes == before) {
+                for (const auto& node : nodes) {
+                    if (ranks.get(node) == static_cast<size_t>(-1)) {
+                        ranks.set(node, rank);
+                        found_nodes += 1;
+                    }
+                }
+            }
         }
     }
 
@@ -143,6 +161,14 @@ struct SpanningTree {
                         e         = edge;
                     }
                 }
+            }
+
+            // Disconnected component: no edge connects the spanning tree to any
+            // remaining node, so the tight tree cannot grow to span them. Stop here
+            // (their init_rank ranks stay valid) instead of dereferencing an invalid
+            // edge (crash) or looping forever.
+            if (e == EdgeId::InvalidID) {
+                break;
             }
 
             auto edge  = g.get_edge(e);
