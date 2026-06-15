@@ -269,9 +269,21 @@ void VertexOrdering::median(size_t iter) {
 }
 
 void VertexOrdering::transpose() {
-    auto improved = true;
+    // transpose() repeatedly sweeps each layer, swapping adjacent vertices when
+    // that strictly reduces edge crossings. Swapping ONLY on a strict improvement
+    // guarantees termination (total crossings strictly decreases per swap and is
+    // bounded below by 0) and, in practice, converges in a handful of sweeps.
+    //
+    // The previous code swapped on `new_crossings <= crossings` (equality too).
+    // Equal swaps are globally crossing-neutral but churn the ordering between
+    // sweeps, which keeps re-exposing strict improvements and prevents the search
+    // from settling -- on large recovered CFGs that made the sweep loop run an
+    // enormous number of times (it looked like an infinite loop). The sweep cap is
+    // a hard upper bound so a pathological graph can never starve the layout.
+    constexpr size_t kMaxSweeps = 64;
 
-    while (improved) {
+    auto improved = true;
+    for (size_t sweep = 0; improved && sweep < kMaxSweeps; ++sweep) {
         improved = false;
         for (auto& nodes : node_layers_) {
             if (nodes.empty()) {
@@ -285,10 +297,9 @@ void VertexOrdering::transpose() {
                 const auto crossings     = count_crossings(*v, *w);
                 const auto new_crossings = count_crossings(*w, *v);
 
-                if (new_crossings <= crossings) {
-                    if (new_crossings < crossings) {
-                        improved = true;
-                    }
+                // Strict improvement only -- see the note above on why `<=` churns.
+                if (new_crossings < crossings) {
+                    improved = true;
 
                     // Swap the node orders
                     orders_.set(*v, i + 1);
