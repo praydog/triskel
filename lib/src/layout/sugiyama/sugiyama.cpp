@@ -306,13 +306,22 @@ void SugiyamaAnalysis::slide_nodes() {
                           return c1.height > c2.height;
                       });
 
+    // Precompute each node's child-edge count ONCE. slide_nodes only moves nodes
+    // between layers (layers_.set) -- it never mutates topology -- so the counts are
+    // invariant across the whole loop below, which calls compute_graph_height
+    // O(candidates * layers) times. Without this, each call rebuilt a vector<Edge>
+    // per node (the layout's dominant cost under a profiler); reading this table is O(1).
+    NodeAttribute<size_t> child_counts{ g, 0 };
+    for (const auto& node : g.nodes())
+        child_counts.get(node) = node.child_edges().size();
+
     for (const auto& candidate : candidates) {
         const auto& node     = candidate.node;
         const auto min_layer = candidate.min_layer;
         const auto max_layer = candidate.max_layer;
         const auto layer     = layers_.get(node);
 
-        auto best_height = compute_graph_height();
+        auto best_height = compute_graph_height(&child_counts);
         auto best_layer  = layer;
 
         for (size_t r = min_layer; r <= max_layer; ++r) {
@@ -321,7 +330,7 @@ void SugiyamaAnalysis::slide_nodes() {
             }
 
             layers_.set(node, r);
-            const auto height = compute_graph_height();
+            const auto height = compute_graph_height(&child_counts);
             if (height < best_height) {
                 best_height = height;
                 best_layer  = r;
@@ -374,16 +383,62 @@ auto SugiyamaAnalysis::is_io_edge(EdgeId edge) const -> bool {
 void SugiyamaAnalysis::remove_long_edges() {
     std::stack<EdgeId> edges_to_split;
 
+    // Long-edge splitting inserts a ghost node per intermediate layer, per edge that
+    // spans >1 layer (a flipped/upward edge additionally wraps two layers on each side
+    // -> span+3, vs span-1 for a plain edge). On a large, densely-connected graph with
+    // many edges spanning most of the layer range this explodes super-linearly: a graph
+    // with tens of thousands of edges over hundreds of ranks can project millions of
+    // ghost nodes, which makes vertex ordering / crossing minimization effectively never
+    // finish (the layout appears to hang). Preflight the exact ghost count with SATURATING
+    // arithmetic; if it exceeds a size-relative budget, skip splitting entirely for this
+    // graph. Long edges then stay whole -- waypoint_creation gives every edge a 4-point
+    // route, so the graph still lays out (edges drawn straighter through the diagram) in
+    // time bounded by the real node/edge count instead of the ghost blowup. Ordinary
+    // graphs stay well under budget and are unaffected.
+    //
+    // Budget: kGhostFloor covers small graphs outright; above that, allow a multiple of
+    // the real node count so genuinely large-but-tractable graphs still split. Beyond it
+    // a Sugiyama layout is not interactively renderable regardless, so straight long
+    // edges are the correct graceful degradation.
+    constexpr size_t kGhostFloor  = 20000;
+    constexpr size_t kGhostPerNode = 32;
+    const size_t real_nodes = g.node_count();
+    const size_t ghost_budget =
+        real_nodes > (SIZE_MAX - kGhostFloor) / kGhostPerNode
+            ? SIZE_MAX
+            : kGhostFloor + kGhostPerNode * real_nodes;
+
+    size_t projected_ghosts = 0;
+    bool over_budget = false;
     for (const auto& edge : g.edges()) {
-        auto from_layer = layers_.get(edge.from());
-        auto to_layer   = layers_.get(edge.to());
+        const auto from_layer = layers_.get(edge.from());
+        const auto to_layer   = layers_.get(edge.to());
+        const auto bottom_layer = std::min(from_layer, to_layer);
+        const auto top_layer    = std::max(from_layer, to_layer);
+        const bool is_flipped = is_flipped_.get(edge);
 
-        auto bottom_layer = std::min(from_layer, to_layer);
-        auto top_layer    = std::max(from_layer, to_layer);
-
-        if (top_layer - bottom_layer > 1 || is_flipped_.get(edge)) {
+        if (top_layer - bottom_layer > 1 || is_flipped) {
+            const size_t span = top_layer - bottom_layer;
+            // Mirror the split loop's is_going_up (see below): an upward-wrapping edge
+            // adds two layers on each side -> span+3 ghosts; otherwise span-1.
+            const bool is_going_up =
+                (is_flipped && (from_layer != bottom_layer)) ||
+                (!is_flipped && (from_layer == bottom_layer));
+            const size_t ghosts = is_going_up
+                                       ? (span > SIZE_MAX - 3 ? SIZE_MAX : span + 3)
+                                       : (span > 0 ? span - 1 : 0);
+            projected_ghosts = (projected_ghosts > SIZE_MAX - ghosts)
+                                   ? SIZE_MAX
+                                   : projected_ghosts + ghosts;
+            if (projected_ghosts > ghost_budget) { over_budget = true; break; }
             edges_to_split.push(edge.id());
         }
+    }
+
+    if (over_budget) {
+        // Too many ghosts would be created: leave every long edge intact and skip
+        // splitting. The layout stays correct and bounded; long edges route straight.
+        return;
     }
 
     auto& ge = g.editor();
@@ -614,7 +669,8 @@ auto SugiyamaAnalysis::get_graph_height() const -> float {
     return height_;
 }
 
-auto SugiyamaAnalysis::compute_graph_height() -> float {
+auto SugiyamaAnalysis::compute_graph_height(
+    const NodeAttribute<size_t>* child_counts) -> float {
     auto y         = 0.0F;
     auto layer_gap = 0.0F;
 
@@ -636,8 +692,12 @@ auto SugiyamaAnalysis::compute_graph_height() -> float {
             layer_height =
                 std::max(layer_height,
                          heights_.get(node) + paddings_.get(node).height());
-            layer_gap +=
-                static_cast<float>(node.child_edges().size()) * EDGE_HEIGHT;
+            // Read the precomputed count when available -- child_edges().size()
+            // rebuilds a whole vector<Edge> per node, which dominates the layout on
+            // large graphs (this is the hottest path under a profiler).
+            const size_t child_count =
+                child_counts ? child_counts->get(node) : node.child_edges().size();
+            layer_gap += static_cast<float>(child_count) * EDGE_HEIGHT;
         }
 
         if (layer_gap == 2.0F * Y_GUTTER) {

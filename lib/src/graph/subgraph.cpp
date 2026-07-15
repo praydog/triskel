@@ -190,26 +190,37 @@ auto SubGraph::get_edge(EdgeId id) const -> Edge {
 
 auto SubGraph::get_nodes(const std::span<const NodeId>& ids) const
     -> std::vector<Node> {
-    return ids  //
-           | std::ranges::views::filter([&](const NodeId& id) {
-                 return !g_.get_node_data(id).deleted;
-             })  //
-           | std::ranges::views::filter([&](const NodeId& id) {
-                 return std::ranges::contains(nodes_, id);
-             })  //
-           | this->node_view();
+    // Subgraph membership is a SORTED-vector lookup: nodes_ is kept sorted via
+    // ordered insert/erase (SubGraphEditor::select_node, and assert_present uses
+    // binary_search on it). Use binary_search, NOT the linear std::ranges::contains
+    // -- this is called per-node from the Sugiyama layout, where the linear scan
+    // made membership O(node_count) per id and the whole height pass O(N^2).
+    std::vector<Node> result;
+    result.reserve(ids.size());
+    for (const NodeId& id : ids) {
+        if (g_.get_node_data(id).deleted) continue;
+        if (!std::ranges::binary_search(nodes_, id)) continue;
+        result.push_back(get_node(id));
+    }
+    return result;
 }
 
 auto SubGraph::get_edges(const std::span<const EdgeId>& ids) const
     -> std::vector<Edge> {
-    return ids  //
-           | std::ranges::views::filter([&](const EdgeId& id) {
-                 return !g_.get_edge_data(id).deleted;
-             })  //
-           | std::ranges::views::filter([&](const EdgeId& id) {
-                 return std::ranges::contains(edges_, id);
-             })  //
-           | this->edge_view();
+    // edges_ is maintained sorted (SubGraphEditor::select_edges ordered insert,
+    // assert_present's binary_search), so membership is a binary_search, NOT the
+    // linear std::ranges::contains. Node::edges()->get_edges() is called per-node
+    // from the Sugiyama layout (child_edges / compute_graph_height), and the linear
+    // scan made each lookup O(degree * E), i.e. O(E^2) per layout-height pass --
+    // the dominant layout cost on a large, densely-connected graph.
+    std::vector<Edge> result;
+    result.reserve(ids.size());
+    for (const EdgeId& id : ids) {
+        if (g_.get_edge_data(id).deleted) continue;
+        if (!std::ranges::binary_search(edges_, id)) continue;
+        result.push_back(get_edge(id));
+    }
+    return result;
 }
 
 auto SubGraph::max_node_id() const -> size_t {

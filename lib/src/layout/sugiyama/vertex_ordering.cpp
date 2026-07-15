@@ -160,6 +160,28 @@ auto VertexOrdering::count_crossings(const NodeView& node1,
            merge_and_count(orders_bottom1, orders_bottom2);
 }
 
+auto VertexOrdering::count_crossings_both(const NodeView& node1,
+                                          const NodeView& node2) const
+    -> std::pair<size_t, size_t> {
+    orders_top1.clear();
+    orders_top2.clear();
+    orders_bottom1.clear();
+    orders_bottom2.clear();
+
+    // Build+sort the four neighbor-order vectors ONCE (this is the transpose
+    // hotspot). Both pair orientations reuse them: merge_and_count is order-
+    // sensitive, so (node1,node2) sums merge(top1,top2)+merge(bottom1,bottom2)
+    // and (node2,node1) sums the swapped merges over the SAME vectors.
+    get_neighbor_orders(node1, orders_top1, orders_bottom1);
+    get_neighbor_orders(node2, orders_top2, orders_bottom2);
+
+    const size_t c12 = merge_and_count(orders_top1, orders_top2) +
+                       merge_and_count(orders_bottom1, orders_bottom2);
+    const size_t c21 = merge_and_count(orders_top2, orders_top1) +
+                       merge_and_count(orders_bottom2, orders_bottom1);
+    return { c12, c21 };
+}
+
 auto VertexOrdering::count_crossings_with_layer(size_t l1,
                                                 size_t l2) -> size_t {
     auto& layer = node_layers_[l1];
@@ -277,7 +299,7 @@ void VertexOrdering::transpose() {
     // The previous code swapped on `new_crossings <= crossings` (equality too).
     // Equal swaps are globally crossing-neutral but churn the ordering between
     // sweeps, which keeps re-exposing strict improvements and prevents the search
-    // from settling -- on large recovered CFGs that made the sweep loop run an
+    // from settling -- on large graphs that made the sweep loop run an
     // enormous number of times (it looked like an infinite loop). The sweep cap is
     // a hard upper bound so a pathological graph can never starve the layout.
     constexpr size_t kMaxSweeps = 64;
@@ -294,8 +316,7 @@ void VertexOrdering::transpose() {
                 const auto* v = nodes[i];
                 const auto* w = nodes[i + 1];
 
-                const auto crossings     = count_crossings(*v, *w);
-                const auto new_crossings = count_crossings(*w, *v);
+                const auto [crossings, new_crossings] = count_crossings_both(*v, *w);
 
                 // Strict improvement only -- see the note above on why `<=` churns.
                 if (new_crossings < crossings) {

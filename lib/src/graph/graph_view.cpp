@@ -128,5 +128,5 @@ auto GraphView::node_count() const -> size_t {
 }
 
 auto GraphView::edge_count() const -> size_t {
-    return nodes_.size();
+    return edges_.size();
 }

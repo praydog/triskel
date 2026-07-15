@@ -181,7 +181,13 @@ struct SugiyamaAnalysis : public ILayout {
     [[nodiscard]] auto compute_graph_width() -> float;
 
     float height_;
-    [[nodiscard]] auto compute_graph_height() -> float;
+    // child_counts (optional): a precomputed per-node child-edge-count table. When
+    // supplied, the height sum reads it in O(1) instead of rebuilding a vector<Edge>
+    // per node (child_edges().size()). slide_nodes passes one -- the counts are
+    // invariant while it only moves nodes between layers -- turning its
+    // O(candidates*layers) calls from the dominant layout cost into cheap lookups.
+    [[nodiscard]] auto compute_graph_height(
+        const NodeAttribute<size_t>* child_counts = nullptr) -> float;
 
     // ----- Entry and exits -----
     /// @brief Ensures the entry/exit nodes are connected to the top/bottom
